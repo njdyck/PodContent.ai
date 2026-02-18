@@ -1,0 +1,5 @@
+# Ohne Domain: HTTP-only auf Port 80
+# Ersetze später durch deine Domain für automatisches HTTPS
+:80 {
+    reverse_proxy api:8000
+}

@@ -1,0 +1,186 @@
+{
+  "name": "PodContent.ai — Audio to Content Pipeline",
+  "meta": {
+    "description": "Webhook empfängt Upload-Event → Whisper transkribiert → LLM generiert 5 Content-Formate → Supabase speichert Ergebnisse",
+    "version": "1.0.0-mvp"
+  },
+  "nodes": [
+    {
+      "name": "1_Webhook_Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "position": [0, 0],
+      "config": {
+        "method": "POST",
+        "path": "process-episode",
+        "authentication": "headerAuth",
+        "headerAuth_name": "x-api-key",
+        "note": "Frontend sendet POST mit { episode_id, user_id, audio_storage_path }. API Key in n8n Credentials hinterlegen."
+      }
+    },
+    {
+      "name": "2_Update_Status_Transcribing",
+      "type": "n8n-nodes-base.supabase",
+      "position": [250, 0],
+      "config": {
+        "operation": "update",
+        "table": "episodes",
+        "filters": { "id": "={{ $json.episode_id }}" },
+        "fields": { "status": "transcribing" },
+        "note": "Service Role Key verwenden (bypassed RLS)"
+      }
+    },
+    {
+      "name": "3_Download_Audio",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [500, 0],
+      "config": {
+        "method": "GET",
+        "url": "={{ 'https://<PROJECT_REF>.supabase.co/storage/v1/object/audio/' + $('1_Webhook_Trigger').json.audio_storage_path }}",
+        "authentication": "genericCredentialType",
+        "headers": {
+          "Authorization": "Bearer {{ $credentials.supabaseServiceKey }}",
+          "apikey": "={{ $credentials.supabaseServiceKey }}"
+        },
+        "responseFormat": "file",
+        "note": "Audio-Datei aus Supabase Storage herunterladen. PROJECT_REF durch echte Supabase-URL ersetzen."
+      }
+    },
+    {
+      "name": "4_Whisper_Transcription",
+      "type": "n8n-nodes-base.openAi",
+      "position": [750, 0],
+      "config": {
+        "resource": "audio",
+        "operation": "transcribe",
+        "model": "whisper-1",
+        "language": "de",
+        "responseFormat": "text",
+        "note": "OpenAI Whisper API. Sprache auf 'de' gesetzt. Max Dateigröße: 25MB. Bei längeren Audios vorher splitten."
+      }
+    },
+    {
+      "name": "5_Save_Transcript",
+      "type": "n8n-nodes-base.supabase",
+      "position": [1000, 0],
+      "config": {
+        "operation": "insert",
+        "table": "transcripts",
+        "fields": {
+          "episode_id": "={{ $('1_Webhook_Trigger').json.episode_id }}",
+          "full_text": "={{ $('4_Whisper_Transcription').json.text }}",
+          "language": "de",
+          "word_count": "={{ $('4_Whisper_Transcription').json.text.split(' ').length }}"
+        }
+      }
+    },
+    {
+      "name": "6_Update_Status_Generating",
+      "type": "n8n-nodes-base.supabase",
+      "position": [1000, 200],
+      "config": {
+        "operation": "update",
+        "table": "episodes",
+        "filters": { "id": "={{ $('1_Webhook_Trigger').json.episode_id }}" },
+        "fields": { "status": "generating" }
+      }
+    },
+    {
+      "name": "7_Generate_All_Content",
+      "type": "n8n-nodes-base.openAi",
+      "position": [1250, 0],
+      "config": {
+        "resource": "chat",
+        "operation": "message",
+        "model": "gpt-4o",
+        "system_prompt": "→ Siehe system-prompt.md",
+        "user_message": "Hier ist das Transkript einer Podcast-Episode. Generiere daraus alle Content-Formate.\n\n---TRANSKRIPT---\n{{ $('4_Whisper_Transcription').json.text }}\n---ENDE---",
+        "response_format": "json_object",
+        "temperature": 0.7,
+        "max_tokens": 4000,
+        "note": "Ein einziger LLM-Call für alle 5 Formate. JSON-Output wird anschließend aufgesplittet. System Prompt separat in system-prompt.md."
+      }
+    },
+    {
+      "name": "8_Parse_JSON_Response",
+      "type": "n8n-nodes-base.code",
+      "position": [1500, 0],
+      "config": {
+        "language": "javascript",
+        "code": "// LLM gibt JSON mit allen Content-Formaten zurück\nconst response = JSON.parse($input.first().json.message.content);\nconst episodeId = $('1_Webhook_Trigger').first().json.episode_id;\n\nconst contentTypes = ['linkedin_post', 'blog_article', 'newsletter', 'tweet_thread', 'show_notes'];\n\nconst items = contentTypes.map(type => ({\n  json: {\n    episode_id: episodeId,\n    content_type: type,\n    title: response[type].title || '',\n    body: response[type].body,\n    metadata: response[type].metadata || {}\n  }\n}));\n\nreturn items;"
+      }
+    },
+    {
+      "name": "9_Save_Contents_to_Supabase",
+      "type": "n8n-nodes-base.supabase",
+      "position": [1750, 0],
+      "config": {
+        "operation": "insert",
+        "table": "contents",
+        "fields": {
+          "episode_id": "={{ $json.episode_id }}",
+          "content_type": "={{ $json.content_type }}",
+          "title": "={{ $json.title }}",
+          "body": "={{ $json.body }}",
+          "metadata": "={{ $json.metadata }}"
+        },
+        "note": "Wird für jedes der 5 Items aus dem Code-Node einmal ausgeführt (n8n Loop)."
+      }
+    },
+    {
+      "name": "10_Update_Status_Completed",
+      "type": "n8n-nodes-base.supabase",
+      "position": [2000, 0],
+      "config": {
+        "operation": "update",
+        "table": "episodes",
+        "filters": { "id": "={{ $('1_Webhook_Trigger').json.episode_id }}" },
+        "fields": { "status": "completed" }
+      }
+    },
+    {
+      "name": "Error_Handler",
+      "type": "n8n-nodes-base.code",
+      "position": [1250, 400],
+      "config": {
+        "language": "javascript",
+        "code": "// Error Trigger — verbunden als Error-Workflow oder via Error-Output\n// Setzt Episode-Status auf 'failed' mit Fehlermeldung\nconst episodeId = $('1_Webhook_Trigger').first().json.episode_id;\nconst errorMsg = $input.first().json.error?.message || 'Unbekannter Fehler';\n\nreturn [{ json: { episode_id: episodeId, error_message: errorMsg } }];",
+        "note": "Verbinde diesen Node mit einem Supabase-Update: status='failed', error_message=errorMsg. Jeden Node mit Error-Output hierhin verbinden."
+      }
+    },
+    {
+      "name": "Error_Update_Episode",
+      "type": "n8n-nodes-base.supabase",
+      "position": [1500, 400],
+      "config": {
+        "operation": "update",
+        "table": "episodes",
+        "filters": { "id": "={{ $json.episode_id }}" },
+        "fields": {
+          "status": "failed",
+          "error_message": "={{ $json.error_message }}"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "1_Webhook_Trigger": ["2_Update_Status_Transcribing"],
+    "2_Update_Status_Transcribing": ["3_Download_Audio"],
+    "3_Download_Audio": ["4_Whisper_Transcription"],
+    "4_Whisper_Transcription": ["5_Save_Transcript", "6_Update_Status_Generating"],
+    "5_Save_Transcript": [],
+    "6_Update_Status_Generating": ["7_Generate_All_Content"],
+    "7_Generate_All_Content": ["8_Parse_JSON_Response"],
+    "8_Parse_JSON_Response": ["9_Save_Contents_to_Supabase"],
+    "9_Save_Contents_to_Supabase": ["10_Update_Status_Completed"],
+    "Error_Handler": ["Error_Update_Episode"]
+  },
+  "setup_checklist": [
+    "1. Supabase Credentials anlegen: URL + Service Role Key",
+    "2. OpenAI Credentials anlegen: API Key",
+    "3. Webhook Auth: Header Auth Credential mit API Key erstellen",
+    "4. <PROJECT_REF> in Node 3 durch echte Supabase Project-URL ersetzen",
+    "5. System Prompt aus system-prompt.md in Node 7 einfügen",
+    "6. Error-Outputs aller Nodes mit Error_Handler verbinden",
+    "7. Workflow aktivieren und Webhook-URL im Frontend hinterlegen"
+  ]
+}
