@@ -5,6 +5,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.config import get_settings
 from app.api.upload import router as upload_router
 
 # ── Logging ──────────────────────────────────────────────────────
@@ -20,19 +21,15 @@ app = FastAPI(
     version="0.1.0",
 )
 
-
-@app.on_event("startup")
-def configure_cors():
-    """Load settings and configure CORS at startup."""
-    from app.config import get_settings
-    settings = get_settings()
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.allowed_origins_list,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+# ── CORS ─────────────────────────────────────────────────────────
+settings = get_settings()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.allowed_origins_list,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # ── Routes ───────────────────────────────────────────────────────

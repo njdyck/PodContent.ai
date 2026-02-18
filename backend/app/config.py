@@ -6,12 +6,12 @@ from typing import List
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
-    # Supabase
-    supabase_url: str
-    supabase_service_role_key: str
+    # Supabase (defaults to empty to avoid crash on import)
+    supabase_url: str = ""
+    supabase_service_role_key: str = ""
 
     # OpenAI
-    openai_api_key: str
+    openai_api_key: str = ""
 
     # CORS — comma-separated list of allowed origins
     allowed_origins: str = "http://localhost:3000"
